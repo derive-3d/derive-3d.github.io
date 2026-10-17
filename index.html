@@ -200,11 +200,12 @@
         </div>
         <div id="best"></div>
         <div id="net"><!-- v9 : jouer a deux (hote autoritaire, WebRTC via PeerJS) -->
-          <div class="netHead">Jouer à deux <span>internet des deux côtés : l’un crée la partie et envoie son lien, l’autre clique dessus (ou entre le code)</span></div>
+          <div class="netHead">Jouer à plusieurs <span>tous ceux qui ouvrent cette page avec un prénom se retrouvent dans le même salon (6 au plus) ; n’importe qui lance. Partie privée : « Créer une partie » et envoyer le lien</span></div>
           <div class="netRow"><label for="netName">Votre prénom</label><input id="netName" maxlength="14" placeholder="prénom" autocomplete="off"></div>
           <div class="netRow"><button id="netHost" class="ghost">Créer une partie</button><span id="netJoinRow"><input id="netCodeIn" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false"><button id="netJoin" class="ghost">Rejoindre</button></span><button id="netLeave" class="ghost" style="display:none">Quitter la partie</button></div>
           <div id="netCode" style="display:none"></div>
           <div id="netLink" style="display:none"><span id="netLinkTxt"></span><button id="netCopy" class="ghost">Copier le lien d’invitation</button></div>
+          <div id="netSalon" class="netStatus ok"></div>
           <div id="netStatus" class="netStatus"></div>
         </div>
         <button id="start">Lancer la régate</button>
@@ -2280,7 +2281,7 @@ let pumpFlash = -99, polarOn = false, hudFull = false, pauseShown = false;
 const SHARED_GPU = new Set();   // geometries et textures partagees par toute la flotte : jamais disposees par newRace
 function releaseKeys() { for (const k in keys) keys[k] = false; }   // perte de focus ou menu : aucune touche ne reste « enfoncee » (revue, point 11)
 function pauseMenu(show) { pauseShown = show; paused = show; $('pauseMenu').style.display = show ? '' : 'none'; $('pause').style.display = 'none'; if (show) releaseKeys(); }
-function quitRace() { if (Net.role === 'host') { Net.send({ t: 'quit' }); Net.stopClock(); } else if (Net.role === 'guest') Net.leave(); pauseMenu(false); gameActive = false; releaseKeys(); $('menu').style.display = ''; $('hud').style.display = 'none'; $('end').style.display = 'none'; delete $('end').dataset.shown; showBest(); }
+function quitRace() { if (Net.role === 'host') { Net.send({ t: 'quit' }); Net.stopClock(); } else if (Net.role === 'guest') { if (Net.salon) Net.send({ t: 'left' }); else Net.leave(); }   /* v9 lot 3 : dans le salon, quitter la manche ne quitte pas le salon */ pauseMenu(false); gameActive = false; releaseKeys(); $('menu').style.display = ''; $('hud').style.display = 'none'; $('end').style.display = 'none'; delete $('end').dataset.shown; showBest(); }
 let opts = { boats: 6, wind: 12, laps: 2, cls: 'ilca7', beat: 350, trim: 'manual', sea: 'abritee', format: 'series', level: 'ligue' };
 /* plan v8 rang 17 (roast 8, game design C3) : niveau de la flotte au menu = plage du niveau (skill) des adversaires ; ligue = l'ancien tirage */
 const LEVELS = { club: [0.35, 0.65], ligue: [0.6, 1.0], national: [0.85, 1.0] };
@@ -2288,10 +2289,11 @@ const LEVELS = { club: [0.35, 0.65], ligue: [0.6, 1.0], national: [0.85, 1.0] };
 let series = null, rankHist = [], rankHistT = -99;
 function newSeries() {
   const n = opts.format === 'series' ? 3 : 1;
-  const off = Net.role === 'host' && Net.connected ? 1 : 0;   // v9 : l'invite prend la place (et la couleur) du premier rival
-  const names = NAMES.filter(x => x !== Net.myName && x !== Net.peerName).sort(() => Math.random() - 0.5);
+  /* v9 lot 3 : reserve de rivaux assez grande pour toute flotte (6 humains au plus) ; les humains prennent les premieres places a la construction de la manche,
+     la serie survit donc aux arrivees et departs d'invites entre deux manches (avant : newSeries() remettait le general a zero des que le nombre d'humains changeait) */
+  const names = NAMES.filter(x => !Net.humans().includes(x)).sort(() => Math.random() - 0.5);
   const rivals = [];
-  for (let i = 1; i < opts.boats - off; i++) rivals.push({ name: names[i % names.length], color: COLORS[(i + off) % COLORS.length], sailNo: 100 + Math.floor(Math.random() * 899), skill: (([lo, hi]) => lo + Math.random() * (hi - lo))(LEVELS[opts.level] || LEVELS.ligue), side: (Math.random() * 2 - 1) * 0.8, margin: 0.08 + Math.random() * 0.5, overstand: 2 + Math.random() * 6, startBias: Math.random(), profile: ['risee', 'conservateur', 'agressif'][i % 3] });
+  for (let i = 1; i < Math.max(opts.boats, NET.maxGuests + 2); i++) rivals.push({ name: names[i % names.length], color: COLORS[i % COLORS.length], sailNo: 100 + Math.floor(Math.random() * 899), skill: (([lo, hi]) => lo + Math.random() * (hi - lo))(LEVELS[opts.level] || LEVELS.ligue), side: (Math.random() * 2 - 1) * 0.8, margin: 0.08 + Math.random() * 0.5, overstand: 2 + Math.random() * 6, startBias: Math.random(), profile: ['risee', 'conservateur', 'agressif'][i % 3] });
   series = { n, index: 0, rivals, results: [] };   // results[k] = [{name, place}]
 }
 const keys = {};
@@ -3714,7 +3716,8 @@ function newRace(specs) {   // v9 : specs = bateaux decrits par l'hote (invite) 
   buildCourseMeshes();
   const cls = CLASSES[opts.cls];
   const n = opts.boats;
-  const hostMulti = Net.role === 'host' && Net.connected, nHum = hostMulti ? 2 : 1;
+  const guests = Net.role === 'host' ? Net.guests.filter(g => g.conn && g.conn.open) : [], hostMulti = guests.length > 0, nHum = 1 + guests.length;
+  const nBoats = Math.max(n, nHum + 1);
   if (specs) {
     for (const sp of specs) {
       const b = new Boat(cls, { isPlayer: sp.me, isHuman: sp.human, name: sp.name, color: sp.color, sailNo: sp.sailNo, profile: sp.profile, skill: sp.skill, x: 0, z: 40, hdg: 40 });
@@ -3722,17 +3725,19 @@ function newRace(specs) {   // v9 : specs = bateaux decrits par l'hote (invite) 
     }
     BOAT_UID = Math.max(...specs.map(sp => sp.id)) + 1;
   } else {
-    if (!series || series.rivals.length !== n - nHum) newSeries();
-    for (let i = 0; i < n; i++) {
-      const isP = i === 0, isG = hostMulti && i === 1, r = isP || isG ? null : series.rivals[i - nHum];
+    if (!series || series.rivals.length < nBoats - 1) newSeries();
+    const humanNames = Net.humans(); let spare = NAMES.filter(x => !humanNames.includes(x) && !series.rivals.some(r => r.name === x));
+    for (let i = 0; i < nBoats; i++) {
+      const isP = i === 0, g = !isP && i <= guests.length ? guests[i - 1] : null, isG = !!g, r = isP || isG ? null : series.rivals[i - nHum];
+      if (r && humanNames.includes(r.name) && spare.length) r.name = spare.shift();   // un invite porte le prenom d'un rival : le rival en change
       const b = new Boat(cls, {
-        isPlayer: isP, isHuman: isP || isG, name: isP ? (Net.role ? Net.myName : 'Vous') : isG ? Net.peerName : r.name, color: isP ? COLORS[0] : isG ? COLORS[1] : r.color,
-        sailNo: isP ? 1 : isG ? 2 : r.sailNo,
+        isPlayer: isP, isHuman: isP || isG, name: isP ? (Net.role ? Net.myName : 'Vous') : isG ? g.name : r.name, color: COLORS[i % COLORS.length],   // couleur par place dans la flotte : les humains prennent les premieres, les rivaux glissent (une couleur par bateau, jamais deux)
+        sailNo: isP ? 1 : isG ? i + 1 : r.sailNo,
         skill: r ? r.skill : undefined, profile: r ? r.profile : undefined, side: r ? r.side : undefined, margin: r ? r.margin : undefined, overstand: r ? r.overstand : undefined, startBias: r ? r.startBias : undefined,
         x: -50 + (i / Math.max(n - 1, 1)) * 100 + (Math.random() - 0.5) * 12, z: 32 + Math.random() * 22,
         hdg: 40 + Math.random() * 30,
       });
-      if (isG) { b.trimAuto = opts.trim === 'auto'; b.sheetManual = b.optSheet(42); b.spiAuto = opts.trim === 'auto'; }
+      if (isG) { b.trimAuto = opts.trim === 'auto'; b.sheetManual = b.optSheet(42); b.spiAuto = opts.trim === 'auto'; g.boat = b; }
       fleet.push(b);
       boatMeshes.set(b, buildBoatMesh(b));
     }
@@ -3740,7 +3745,7 @@ function newRace(specs) {   // v9 : specs = bateaux decrits par l'hote (invite) 
   rankHist = []; rankHistT = -99;
   player = fleet.find(b => b.isPlayer) || fleet[0];
   player.autopilot = false; player.trimAuto = opts.trim === 'auto'; player.sheetManual = player.optSheet(42); player.spiAuto = opts.trim === 'auto';
-  race = new Race(fleet, { countdown: 75 });
+  race = new Race(fleet, { countdown: 75 }); race.multi = nHum > 1 || !!specs;   // v9 : manche a plusieurs (pas de record), aussi si un invite arrive en cours de manche (addGuestBoat)
   camPos = null; camSideT = 0; camRoll = 0; camSideSwaps = 0; camYawOff = 0; camPitchOff = 0; camPrevHdg = null; camLead = 0; simT = 0; acc = 0; paused = false; gameActive = true; timeScale = 1; lastShiftMsg = -99; hornsPlayed = 0;
   SEA.swell = opts.sea === 'ouverte' ? 4 : 1;
   $('menu').style.display = 'none'; $('end').style.display = 'none'; $('hud').style.display = ''; pauseMenu(false); paused = false;
@@ -3985,7 +3990,7 @@ function toYou(t) { for (const [re, r] of YOU) if (re.test(t)) return t.replace(
 function showEnd() {
   $('end').dataset.shown = '1';
   const out = !player.finished && race.playerOut;   // J2 : DSQ ou OCS non repare, le joueur n'arrive pas
-  const isBest = out || player.dsq || player.ocs || Net.role ? false : saveBest(player.finishTime);   // v9 : pas de record en partie a deux   // un DSQ (+3600 s) ou un OCS non repare n'est pas un record (revue, point 10)
+  const isBest = out || player.dsq || player.ocs || race.multi ? false : saveBest(player.finishTime);   // v9 : pas de record en partie a plusieurs (seul dans le salon : record normal)   // un DSQ (+3600 s) ou un OCS non repare n'est pas un record (revue, point 10)
   const all = loadBest();
   /* places de la manche : arrives dans l'ordre, les autres a leur position du moment */
   const order = race.results.slice().concat(race.ranking().filter(b => !b.finished));
@@ -4048,8 +4053,7 @@ function simStep(dt) {
   Wind.update(dt);
   race.step(dt);
   if (!player.autopilot) applyKeys(player, keys, dt);
-  const gb = Net.role === 'host' ? Net.guestBoat() : null;   // v9 : le bateau de l'invite recoit ses touches recues par le reseau
-  if (gb && !gb.autopilot) applyKeys(gb, Net.guestKeys, dt);
+  if (Net.role === 'host') for (const g of Net.guests) { const gb = g.boat; if (gb && !gb.autopilot && fleet.includes(gb)) applyKeys(gb, g.keys, dt); }   // v9 : chaque invite barre son bateau avec ses touches recues
   for (const o of fleet) o.step(dt, simT, fleet, race);
   Rules.step(fleet, race, simT, dt);
   if (race.phase === 'racing' && simT - rankHistT >= 5) { rankHistT = simT; rankHist.push({ t: race.time, leg: player.leg, pos: race.ranking().indexOf(player) + 1 }); }
@@ -4272,7 +4276,7 @@ function bind() {
     if (k === 'a') { player.setAutopilot(!player.autopilot); $('auto').classList.toggle('on', player.autopilot); }   // lot PR : A prend aussi le spi
     if (k === 'm' || k === 'l') { const w = k === 'm' ? 'map' : 'rank'; panels[w] = !panels[w]; applyPanels(); }
     if (k === 'k') { panels.help = panels.help === 'mini' ? 'full' : panels.help === 'full' ? false : 'mini'; applyPanels(); }   // retour Stan 17/10 : une ligne -> toutes -> masque   // retour Stan 12/10 : carte, classement et touches se masquent chacun
-    if (k === 't') timeScale = timeScale >= 3 ? 1 : timeScale + 1;
+    if (k === 't') { if (Net.role === 'host' && Net.connected) { timeScale = 1; if (race) race.say(null, '💡 Pas de vitesse du temps à plusieurs : tout le monde joue en temps réel'); } else timeScale = timeScale >= 3 ? 1 : timeScale + 1; }   // retour Stan 17/10 : T coupe en multijoueur
     if (k === 'v') soundToggle();
     if (k === 'f') { const f = $('fps'); f.style.display = f.style.display === 'none' ? '' : 'none'; }
     if (k === 'x') { player.trimAuto = !player.trimAuto; player.easeHold = 0; }
@@ -4302,6 +4306,10 @@ function bind() {
   hold('btnTack', 'Space');
   $('btnCam').addEventListener('click', () => { camMode = (camMode + 1) % 3; });
   $('start').addEventListener('click', () => {
+    if (Net.role === 'guest') { if (Net.salon && Net.connected) { Net.send({ t: 'start' }); Net.status('Demande envoyée à l’hôte, la régate part avec ses réglages', 'wait'); } return; }
+    hostStart();
+  });
+  window.hostStart = function hostStart() {
     opts.boats = parseInt($('optBoats').value, 10);
     opts.wind = parseInt($('optWind').value, 10);
     opts.laps = parseInt($('optLaps').value, 10);
@@ -4315,7 +4323,7 @@ function bind() {
     lastBeep = -1;
     newRace();
     if ($('optSound').value === 'on') { if (audio && audio.state === 'suspended') audio.resume(); soundOn(); } else soundWanted = false;
-  });
+  };
   $('resume').addEventListener('click', () => pauseMenu(false));
   $('quitRace').addEventListener('click', quitRace);
   /* recommencer la manche en cours (demande Stan 04/10) : memes rivaux, meme vent de menu, la procedure repart ; la manche n'est pas comptee */
@@ -4329,10 +4337,15 @@ function bind() {
   $('netCopy').addEventListener('click', () => Net.copyInvite());
   try { $('netName').value = localStorage.getItem('regate-3d-name') || ''; } catch (e) { /* rien */ }
   /* v9 lot 2 : arrivee par un lien d'invitation (#CODE) : code pre-rempli ; prenom connu -> on rejoint tout de suite */
-  { const hc = Net.fromHash();
+  { const hc = Net.fromHash(), sh = Net.salonFromHash();
     if (hc) { $('netCodeIn').value = hc;
       if ($('netName').value.trim()) Net.join(hc);
       else { Net.status('Écrivez votre prénom, puis Entrée : la partie ' + hc + ' vous attend', 'wait'); setTimeout(() => $('netName').focus(), 50); } }
+    else if (sh !== 'off') {   // v9 lot 3 : salon commun, tout le monde arrive sur la meme page (#salon=off pour ne pas y entrer, #salon=nom pour un salon a part)
+      const enter = () => { if (!Net.role && !Net.salon && $('netName').value.trim() && Net.hasPeer()) Net.enterSalon(sh || NET.salon); };
+      if ($('netName').value.trim()) enter();
+      else { Net.status('Écrivez votre prénom pour entrer dans le salon', 'wait'); setTimeout(() => $('netName').focus(), 50); }
+      $('netName').addEventListener('change', enter); }
     $('netName').addEventListener('keydown', e => { if (e.key === 'Enter' && /^[a-z]{4}$/i.test($('netCodeIn').value.trim()) && !Net.role) { $('netName').dispatchEvent(new Event('change')); Net.join($('netCodeIn').value); } }); }
   $('netName').addEventListener('change', () => { try { localStorage.setItem('regate-3d-name', $('netName').value.trim()); } catch (e) { /* rien */ } });
   $('toMenu').addEventListener('click', quitRace);
@@ -4373,7 +4386,7 @@ window.addEventListener('load', () => {
      invite -> hote : { t:'hello', name } · { t:'keys', k:masque } · { t:'tog', w:'auto'|'trim'|'spi'|'pump'|'protest' }
      hote -> invite : { t:'welcome', name } · { t:'setup', ... } · { t:'snap', ... } · { t:'quit' }
    =========================================================================== */
-const NET = { hz: 15, delay: 0.12, prefix: 'regate3d-', alphabet: 'ABCDEFGHJKLMNPQRSTUVWXYZ', publicUrl: 'https://derive-3d.github.io/' };
+const NET = { hz: 15, delay: 0.12, prefix: 'regate3d-', alphabet: 'ABCDEFGHJKLMNPQRSTUVWXYZ', publicUrl: 'https://derive-3d.github.io/', salon: 'derive', salonPrefix: 'regate3d-salon-', maxGuests: 5 };   // salon : identifiant fixe, premier arrive = hote, 6 humains au plus
 /* champs d'un bateau dans un instantane, dans cet ordre (pack et unpack symetriques) */
 const NET_F = {
   lerp: ['x', 'z', 'spd', 'gx', 'gz', 'rudder', 'sheet', 'heel', 'roll', 'hike', 'hikeEff', 'spiUp', 'planing', 'helmHold', 'helmAngle', 'leeway', 'sheetManual', 'easeHold'],
@@ -4387,8 +4400,15 @@ function maskKeys(m, K) { for (const [c, b] of KEY_BITS) K[c] = !!(m & b); retur
 function lerpAng(a, b, k) { return normDeg(a + angDiff(b, a) * k); }
 
 const Net = {
-  role: null, peer: null, conn: null, code: '', myName: '', peerName: '', connected: false,
-  guestKeys: {}, lastMask: -1, lastSnapAt: 0, evSeqSent: -1, incSent: -1, snaps: [], simClock: null, sentSetup: false,
+  role: null, peer: null, code: '', myName: '', connected: false, salon: '', salonTries: 0, _salonTimer: null,
+  /* v9 lot 3 : plusieurs invites chez l'hote ; guests = [{ conn, name, keys, boat }] ; conn / peerName / guestKeys restent des raccourcis sur le premier (tests) */
+  guests: [],
+  get conn() { return this.guests.length ? this.guests[0].conn : null; },
+  set conn(c) { if (!c) { this.guests = []; return; } if (this.guests.length) this.guests[0].conn = c; else this.guests.push({ conn: c, name: this._pendingName || '', keys: {}, boat: null }); },
+  get peerName() { return this.role === 'guest' ? this._hostName || '' : (this.guests.length ? this.guests[0].name : ''); },
+  set peerName(n) { if (this.role === 'guest') { this._hostName = n; return; } if (this.guests.length) this.guests[0].name = n; else this._pendingName = n; },
+  get guestKeys() { if (!this.guests.length) this.guests.push({ conn: null, name: this._pendingName || '', keys: {}, boat: null }); return this.guests[0].keys; },
+  lastMask: -1, lastSnapAt: 0, evSeqSent: -1, incSent: -1, snaps: [], simClock: null, sentSetup: false,
   status(txt, cls) { const el = $('netStatus'); if (el) { el.textContent = txt; el.className = 'netStatus ' + (cls || ''); } },
   name() { const el = $('netName'); const v = el && el.value.trim(); return v ? v.slice(0, 14) : (this.role === 'host' ? 'Hôte' : 'Invité'); },
   genCode() { let c = ''; for (let i = 0; i < 4; i++) c += NET.alphabet[Math.floor(Math.random() * NET.alphabet.length)]; return c; },
@@ -4403,6 +4423,8 @@ const Net = {
     return base + '#' + (code || this.code);
   },
   fromHash() { try { const m = /^#([a-z]{4})$/i.exec(location.hash || ''); return m ? m[1].toUpperCase() : ''; } catch (e) { return ''; } },
+  /* #salon=NOM : salon a part (tests, ou une bande d'amis) ; #salon=off : pas d'entree automatique */
+  salonFromHash() { try { const m = /^#salon=([a-z0-9-]{1,16})$/i.exec(location.hash || ''); return m ? m[1].toLowerCase() : ''; } catch (e) { return ''; } },
   copyInvite() {
     const url = this.inviteUrl(), done = () => this.status('Lien copié : envoyez-le, votre adversaire n’aura qu’à cliquer', 'ok');
     const fallback = () => { try { const r = document.createRange(); r.selectNodeContents($('netLinkTxt')); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); if (document.execCommand('copy')) done(); else this.status('Copiez le lien affiché', 'wait'); } catch (e) { this.status('Copiez le lien affiché', 'wait'); } };
@@ -4410,50 +4432,78 @@ const Net = {
   },
   showInvite(on) { const el = $('netLink'); if (!el) return; el.style.display = on ? '' : 'none'; if (on) $('netLinkTxt').textContent = this.inviteUrl(); },
   hasPeer() { return typeof Peer !== 'undefined'; },
-  /* --- creer une partie : l'hote attend l'invite ----------------------------------- */
-  host() {
+  humans() { return [this.myName].concat(this.guests.filter(g => g.conn && g.conn.open).map(g => g.name)).filter(Boolean); },
+  /* --- salon commun (v9 lot 3, demande Stan 17/10 : « tout le monde arrive sur la meme page ») -----
+     identifiant fixe sur le broker : le premier arrive tient le salon (hote), les suivants s'y connectent (invites).
+     Hote disparu : les invites reviennent au menu et retentent, l'un d'eux devient hote. Identifiant mort chez le
+     broker (onglet endormi) : rejoindre echoue, on retente d'heberger, jusqu'a 8 essais. */
+  enterSalon(name) {
     if (!this.hasPeer()) return this.status('Bibliothèque réseau absente', 'bad');
+    this.salon = (name || NET.salon).toLowerCase(); this.salonTries++;
+    if (this.salonTries > 8) { this.salon = ''; this.salonTries = 0; return this.status('Salon injoignable pour l’instant : créez une partie, ou rechargez la page', 'bad'); }
+    this.host(NET.salonPrefix + this.salon);
+  },
+  salonRetry(ms) { clearTimeout(this._salonTimer); if (!this.salon) return; const s = this.salon; this._salonTimer = setTimeout(() => { if (!this.role) this.enterSalon(s); }, ms); },
+  leaveSalon() { clearTimeout(this._salonTimer); this.salon = ''; this.salonTries = 0; },
+  /* --- creer une partie : l'hote attend les invites ------------------------------- */
+  host(fixedId) {
+    if (!this.hasPeer()) return this.status('Bibliothèque réseau absente', 'bad');
+    if (!fixedId) this.leaveSalon();
     this.leave(true);
-    this.role = 'host'; this.myName = this.name(); this.code = this.myCode(this._renewCode); this._renewCode = false;
-    this.status('Connexion au serveur de mise en relation…');
-    const p = this.peer = new Peer(NET.prefix + this.code, { debug: 1 });
-    p.on('open', () => { this._retried = false; this.status('En attente de votre adversaire : envoyez-lui le lien (ou le code ' + this.code + ')', 'wait'); $('netCode').textContent = this.code; $('netCode').style.display = ''; this.showInvite(true); });
+    this.role = 'host'; this.myName = this.name(); this.code = fixedId ? '' : this.myCode(this._renewCode); this._renewCode = false;
+    this.status(fixedId ? 'Entrée dans le salon…' : 'Connexion au serveur de mise en relation…');
+    const p = this.peer = new Peer(fixedId || NET.prefix + this.code, { debug: 1 });
+    p.on('open', () => {
+      this._retried = false; this.salonTries = 0;
+      if (fixedId) { this.status('Salon ouvert : vous êtes l’hôte, les autres arrivent tout seuls', 'wait'); }
+      else { this.status('En attente de votre adversaire : envoyez-lui le lien (ou le code ' + this.code + ')', 'wait'); $('netCode').textContent = this.code; $('netCode').style.display = ''; this.showInvite(true); }
+      this.uiRole();
+    });
     p.on('connection', c => {
-      if (this.conn && this.conn.open) { c.close(); return; }   // une seule place
-      this.conn = c;
+      if (this.guests.filter(g => g.conn && g.conn.open).length >= NET.maxGuests) { try { c.on('open', () => { c.send({ t: 'full' }); setTimeout(() => c.close(), 500); }); } catch (e) { /* rien */ } return; }
+      const g = { conn: c, name: '', keys: {}, boat: null };
+      if (this.guests.length === 1 && !this.guests[0].conn) this.guests[0].conn = c; else this.guests.push(g);
+      const me = this.guests.find(x => x.conn === c);
       c.on('open', () => { this.connected = true; });
-      c.on('data', d => this.onHostData(d));
-      c.on('close', () => this.onPeerLost());
+      c.on('data', d => this.onHostData(d, me));
+      c.on('close', () => this.onPeerLost(me));
       c.on('error', e => this.status('Erreur de liaison : ' + (e && e.message || e), 'bad'));
     });
     p.on('error', e => {
       if (e && e.type === 'unavailable-id' && this.role === 'host' && !this.connected) {
+        if (fixedId) { this.leave(true); this.join(fixedId, true); return; }   // salon deja tenu : on y entre en invite
         if (!this._retried) { this._retried = true; this.status('Code occupé, nouvel essai…', 'wait'); setTimeout(() => { if (this.role === 'host' && !this.connected) this.host(); }, 1500); return; }
         this._retried = false; this._renewCode = true; this.status('Code occupé : nouveau code, votre lien d’invitation change', 'wait'); setTimeout(() => { if (this.role === 'host' && !this.connected) this.host(); }, 300); return;
       }
+      if (fixedId && (e && (e.type === 'network' || e.type === 'server-error'))) { this.leave(true); this.role = null; this.status('Serveur de mise en relation injoignable, nouvel essai…', 'wait'); this.salonRetry(4000); return; }
       this.onPeerError(e);
     });
     p.on('disconnected', () => { if (this.role === 'host' && !this.connected) this.status('Serveur de mise en relation perdu, recréez la partie', 'bad'); });
     this.uiRole();
   },
-  /* --- rejoindre : l'invite se connecte au code ------------------------------------ */
-  join(code) {
+  /* --- rejoindre : l'invite se connecte au code (ou a l'identifiant fixe du salon) ---- */
+  join(code, fixed) {
     if (!this.hasPeer()) return this.status('Bibliothèque réseau absente', 'bad');
-    code = (code || '').trim().toUpperCase().replace(/[^A-Z]/g, '');
-    if (code.length !== 4) return this.status('Code à 4 lettres attendu', 'bad');
+    let id;
+    if (fixed) id = code;
+    else { code = (code || '').trim().toUpperCase().replace(/[^A-Z]/g, ''); if (code.length !== 4) return this.status('Code à 4 lettres attendu', 'bad'); id = NET.prefix + code; this.leaveSalon(); }
     this.leave(true);
-    this.role = 'guest'; this.myName = this.name(); this.code = code;
-    this.status('Connexion…');
+    this.role = 'guest'; this.myName = this.name(); this.code = fixed ? '' : code;
+    this.status(fixed ? 'Salon trouvé, connexion à l’hôte…' : 'Connexion…');
     const p = this.peer = new Peer({ debug: 1 });
     p.on('open', () => {
-      const c = this.conn = p.connect(NET.prefix + code, { reliable: true, serialization: 'json' });
-      const to = setTimeout(() => { if (!this.connected) this.status('Pas de réponse : code inconnu, ou liaison directe impossible depuis ce réseau', 'bad'); }, 12000);
-      c.on('open', () => { clearTimeout(to); this.connected = true; this.send({ t: 'hello', name: this.myName }); this.status('Connecté, en attente du lancement par l’hôte', 'wait'); });
+      const c = p.connect(id, { reliable: true, serialization: 'json' });
+      this.guests = [{ conn: c, name: '', keys: {}, boat: null }];
+      const to = setTimeout(() => { if (!this.connected) { if (fixed) { this.leave(true); this.role = null; this.status('Salon sans réponse, nouvel essai…', 'wait'); this.salonRetry(2500); } else this.status('Pas de réponse : code inconnu, ou liaison directe impossible depuis ce réseau', 'bad'); } }, fixed ? 8000 : 12000);
+      c.on('open', () => { clearTimeout(to); this.connected = true; this.salonTries = 0; this.send({ t: 'hello', name: this.myName }); this.status('Connecté, en attente du lancement par l’hôte', 'wait'); this.uiRole(); });
       c.on('data', d => this.onGuestData(d));
       c.on('close', () => this.onPeerLost());
       c.on('error', e => this.status('Erreur de liaison : ' + (e && e.message || e), 'bad'));
     });
-    p.on('error', e => this.onPeerError(e));
+    p.on('error', e => {
+      if (fixed && e && (e.type === 'peer-unavailable' || e.type === 'network' || e.type === 'server-error')) { this.leave(true); this.role = null; this.status('Salon vide ou endormi, nouvel essai…', 'wait'); this.salonRetry(3000); return; }
+      this.onPeerError(e);
+    });
     this.uiRole();
   },
   onPeerError(e) {
@@ -4461,48 +4511,60 @@ const Net = {
     const msg = type === 'unavailable-id' ? 'Ce code est déjà pris, recréez la partie' : type === 'peer-unavailable' ? 'Aucune partie avec ce code' : type === 'network' || type === 'server-error' ? 'Serveur de mise en relation injoignable (internet ?)' : 'Erreur réseau : ' + (e && e.message || type);
     this.status(msg, 'bad');
   },
-  onPeerLost() {
-    const wasHost = this.role === 'host';
-    this.connected = false;
-    if (wasHost) {
-      const gb = this.guestBoat(); if (gb && gameActive) { gb.setAutopilot(true); if (race) race.say(gb, 'a quitté la partie : pilote automatique'); }
-      this.status('Votre adversaire a quitté la partie', 'bad');
-      this.conn = null;   // la salle reste ouverte : il peut revenir
+  onPeerLost(g) {
+    if (this.role === 'host') {
+      if (!g) g = this.guests[0];
+      if (g) { const gb = g.boat; if (gb && gameActive && fleet.includes(gb) && !gb.autopilot) { gb.setAutopilot(true); if (race) race.say(gb, 'a quitté la partie : pilote automatique'); } g.conn = null; g.boat = null; }
+      this.guests = this.guests.filter(x => x.conn && x.conn.open);
+      this.connected = this.guests.length > 0;
+      this.status((g && g.name ? g.name : 'Votre adversaire') + ' a quitté la partie' + (this.connected ? ' · ' + this.humans().slice(1).join(', ') + ' encore là' : ''), this.connected ? 'wait' : 'bad');
+      this.uiRole();
     } else {
+      const wasSalon = this.salon;
+      this.connected = false;
       this.status('Liaison perdue avec l’hôte', 'bad');
       if (gameActive) { quitRace(); }
-      this.leave();
+      this.leave(true); this.role = null; this.uiRole();
+      if (wasSalon) { this.status('L’hôte est parti, le salon se reforme…', 'wait'); this.salonRetry(500 + Math.random() * 2000); }   // chacun retente a un moment different : l'un devient hote
     }
   },
   leave(keepUi) {
-    try { if (this.conn) this.conn.close(); } catch (e) { /* rien */ }
+    for (const g of this.guests) { try { if (g.conn) g.conn.close(); } catch (e) { /* rien */ } }
     try { if (this.peer) this.peer.destroy(); } catch (e) { /* rien */ }
-    this.conn = null; this.peer = null; this.connected = false; this.role = null; this.peerName = ''; this.snaps = []; this.lastMask = -1; this.evSeqSent = -1; this.incSent = -1; this.sentSetup = false;
+    this.guests = []; this.peer = null; this.connected = false; this.role = null; this._hostName = ''; this._pendingName = ''; this.snaps = []; this.lastMask = -1; this.evSeqSent = -1; this.incSent = -1; this.sentSetup = false;
     this.stopClock();
-    if (!keepUi) { this.status(''); $('netCode').style.display = 'none'; this.showInvite(false); this.uiRole(); }
+    if (!keepUi) { this.leaveSalon(); this.status(''); $('netCode').style.display = 'none'; this.showInvite(false); this.uiRole(); }
   },
-  send(o) { if (this.conn && this.conn.open) { try { this.conn.send(o); } catch (e) { /* liaison fermee entre deux images */ } } },
-  guestBoat() { return fleet.find(b => b.isHuman && !b.isPlayer) || null; },
+  send(o) { for (const g of this.guests) { if (g.conn && g.conn.open) { try { g.conn.send(o); } catch (e) { /* liaison fermee entre deux images */ } } } },
+  sendTo(g, o) { if (g && g.conn && g.conn.open) { try { g.conn.send(o); } catch (e) { /* rien */ } } },
+  guestBoat() { const g = this.guests.find(x => x.boat && fleet.includes(x.boat)); return g ? g.boat : (fleet.find(b => b.isHuman && !b.isPlayer) || null); },
+  guestBoats() { return this.guests.filter(x => x.boat && fleet.includes(x.boat)).map(x => x.boat); },
   uiRole() {
     const start = $('start'); if (!start) return;
-    const solo = !this.role;
-    start.textContent = solo ? 'Lancer la régate' : this.role === 'host' ? (this.connected ? 'Lancer la régate à deux' : 'Lancer la régate (en attendant l’adversaire)') : 'L’hôte lance la régate';
-    start.disabled = this.role === 'guest';
-    $('netLeave').style.display = solo ? 'none' : '';
-    $('netHost').style.display = solo ? '' : 'none'; $('netJoinRow').style.display = solo ? '' : 'none';
-    if (this.role !== 'host') this.showInvite(false);
+    const solo = !this.role, n = this.humans().length;
+    start.textContent = solo ? 'Lancer la régate' : this.role === 'host' ? (this.connected ? 'Lancer la régate à ' + n : (this.salon ? 'Lancer la régate (seul pour l’instant)' : 'Lancer la régate (en attendant l’adversaire)')) : (this.salon ? 'Lancer la régate pour tous' : 'L’hôte lance la régate');
+    start.disabled = this.role === 'guest' && !this.salon;
+    $('netLeave').style.display = solo ? 'none' : ''; $('netLeave').textContent = this.salon ? 'Quitter le salon' : 'Quitter la partie';
+    $('netHost').style.display = solo || this.salon ? '' : 'none'; $('netJoinRow').style.display = solo || this.salon ? '' : 'none';
+    if (this.role !== 'host' || this.salon) this.showInvite(false);
+    const sl = $('netSalon'); if (sl) sl.textContent = this.salon && this.role ? 'Salon' + (this.salon !== NET.salon ? ' « ' + this.salon + ' »' : '') + ' : ' + this.humans().map((h, i) => i === 0 && this.role === 'host' ? h + ' (hôte)' : h).join(', ') + (this.role === 'guest' ? ' (hôte : ' + (this._hostName || '…') + ')' : '') + (n === 1 ? ' · en attendant les autres' : '') : '';
   },
-  /* --- hote : reception -------------------------------------------------------------- */
-  onHostData(d) {
+  /* --- hote : reception ------------------------------------------------------------- */
+  onHostData(d, g) {
     if (!d || typeof d !== 'object') return;
+    if (!g) g = this.guests[0] || (this.guests.push({ conn: this.conn, name: '', keys: {}, boat: null }), this.guests[0]);
     if (d.t === 'hello') {
-      this.peerName = String(d.name || 'Invité').slice(0, 14); this.connected = true;
-      this.status(this.peerName + ' est connecté' + (gameActive ? '' : ' : lancez la régate'), 'ok'); this.uiRole();
-      this.send({ t: 'welcome', name: this.myName });
-      if (gameActive && race) { this.addGuestBoat(); this.sendSetup(); }   // arrive en cours de manche : il prend la barre d'un bateau
-    } else if (d.t === 'keys') { maskKeys(d.k | 0, this.guestKeys); }
+      let nm = String(d.name || 'Invité').slice(0, 14); const others = [this.myName].concat(this.guests.filter(x => x !== g && x.conn && x.conn.open).map(x => x.name)); const taken = others.filter(h => h === nm).length; if (taken) nm = (nm + ' ' + (taken + 1)).slice(0, 14);
+      g.name = nm; this.connected = true;
+      this.status(nm + ' est connecté' + (gameActive ? '' : (this.salon ? '' : ' : lancez la régate')), 'ok'); this.uiRole();
+      this.sendTo(g, { t: 'welcome', name: this.myName, salon: this.salon, humans: this.humans() });
+      if (typeof timeScale !== 'undefined') timeScale = 1;   // retour Stan 17/10 : pas de temps x2 x3 a plusieurs
+      if (gameActive && race) { this.addGuestBoat(g); this.sendSetup(); }   // arrive en cours de manche : il prend la barre d'un bateau
+    } else if (d.t === 'keys') { maskKeys(d.k | 0, g.keys); }
+    else if (d.t === 'left') { const gb = g.boat; if (gb && gameActive && fleet.includes(gb) && !gb.autopilot) { gb.setAutopilot(true); if (race) race.say(gb, 'a quitté la manche : pilote automatique'); } g.boat = null; this.status((g.name || 'Un invité') + ' a quitté la manche, reste dans le salon', 'wait'); }
+    else if (d.t === 'start') { if (this.salon && !gameActive && typeof hostStart === 'function') { this.status((g.name || 'Un invité') + ' lance la régate', 'ok'); hostStart(); } }
     else if (d.t === 'tog') {
-      const gb = this.guestBoat(); if (!gb || !gameActive) return;
+      const gb = g.boat; if (!gb || !gameActive || !fleet.includes(gb)) return;
       if (d.w === 'auto') gb.setAutopilot(!gb.autopilot);
       else if (d.w === 'trim') { gb.trimAuto = !gb.trimAuto; gb.easeHold = 0; }
       else if (d.w === 'spi' && gb.cls.spi) { gb.spiAuto = false; gb.spiWant = !gb.spiWant; }
@@ -4510,27 +4572,34 @@ const Net = {
       else if (d.w === 'protest' && race && race.phase !== 'done' && !gb.finished) Rules.protest(gb, fleet, race, simT);
     }
   },
-  /* un invite qui arrive pendant une manche : il reprend l'IA la plus proche du joueur (sans toucher aux resultats) */
-  addGuestBoat() {
-    const prev = this.guestBoat();
-    if (prev) { prev.name = this.peerName; prev.setAutopilot(false); race.say(prev, 'reprend la barre'); return; }   // revenu apres une coupure : son bateau l'attendait au pilote
+  /* un invite qui arrive pendant une manche : son bateau s'il l'attendait au pilote (meme prenom), sinon l'IA la plus proche du joueur */
+  addGuestBoat(g) {
+    if (!g) g = this.guests[0];
+    const owned = new Set(this.guests.filter(x => x !== g).map(x => x.boat));
+    const prev = fleet.find(b => b.isHuman && !b.isPlayer && !owned.has(b) && (b.name === g.name || b.autopilot));
+    if (prev) { prev.name = g.name; g.boat = prev; prev.setAutopilot(false); race.say(prev, 'reprend la barre'); return; }   // revenu apres une coupure : son bateau l'attendait au pilote
     const ai = fleet.filter(b => !b.isHuman && !b.finished).sort((a, b) => Math.hypot(a.x - player.x, a.z - player.z) - Math.hypot(b.x - player.x, b.z - player.z))[0];
     if (!ai) return;
-    ai.isHuman = true; ai.name = this.peerName; ai.setAutopilot(false); ai.trimAuto = opts.trim === 'auto'; ai.sheetManual = ai.sheet; ai.spiAuto = opts.trim === 'auto';
-    const M = boatMeshes.get(ai); if (M) { /* le nom change, l'etiquette suit au prochain rendu */ }
-    race.say(ai, 'prend la barre');
+    ai.isHuman = true; ai.name = g.name; ai.setAutopilot(false); ai.trimAuto = opts.trim === 'auto'; ai.sheetManual = ai.sheet; ai.spiAuto = opts.trim === 'auto'; g.boat = ai;
+    race.multi = true; race.say(ai, 'prend la barre');
   },
   /* --- hote : envoi ------------------------------------------------------------------ */
   windStatic() { return { knots: opts.wind, seed: Wind.seed, dir0: Wind.dir0 }; },
+  setupFor(g) {
+    return {
+      t: 'setup', opts: Object.assign({}, opts), hostName: this.myName, swell: SEA.swell, humans: this.humans(),
+      series: series ? { n: series.n, index: series.index, results: series.results.map(r => r ? r.map(p => ({ name: p.name, color: p.color, place: p.place, time: p.time, code: p.code })) : null) } : null,
+      wind: this.windStatic(),
+      boats: fleet.map(b => ({ id: b.id, name: b.name, color: b.color, sailNo: b.sailNo, human: b.isHuman, me: b === g.boat, profile: b.ai.profile, skill: b.ai.skill })),
+    };
+  },
   sendSetup() {
     if (this.role !== 'host' || !race) return;
     this.evSeqSent = -1; this.incSent = -1; this.sentSetup = true;
-    this.send({
-      t: 'setup', opts: Object.assign({}, opts), hostName: this.myName, swell: SEA.swell,
-      series: series ? { n: series.n, index: series.index, results: series.results.map(r => r ? r.map(p => ({ name: p.name, color: p.color, place: p.place, time: p.time, code: p.code })) : null) } : null,
-      wind: this.windStatic(),
-      boats: fleet.map(b => ({ id: b.id, name: b.name, color: b.color, sailNo: b.sailNo, human: b.isHuman, me: b.isHuman && !b.isPlayer, profile: b.ai.profile, skill: b.ai.skill })),
-    });
+    for (const g of this.guests) {
+      if (!g.boat || !fleet.includes(g.boat)) g.boat = fleet.find(b => b.isHuman && !b.isPlayer && b.name === g.name) || null;   // flotte construite par newRace : le bateau porte son prenom
+      this.sendTo(g, this.setupFor(g));
+    }
     this.sendSnap(true);
   },
   packBoat(b) {
@@ -4580,7 +4649,8 @@ const Net = {
   /* --- invite : reception ------------------------------------------------------------- */
   onGuestData(d) {
     if (!d || typeof d !== 'object') return;
-    if (d.t === 'welcome') { this.peerName = String(d.name || 'Hôte').slice(0, 14); this.status('Connecté à ' + this.peerName + ', en attente du lancement', 'wait'); }
+    if (d.t === 'welcome') { this.peerName = String(d.name || 'Hôte').slice(0, 14); this.status('Connecté à ' + this.peerName + (this.salon ? '' : ', en attente du lancement'), 'wait'); this.uiRole(); }
+    else if (d.t === 'full') { this.status('Salon complet (6 joueurs)', 'bad'); this.leaveSalon(); }
     else if (d.t === 'setup') { this.snaps = []; netGuestStart(d); }
     else if (d.t === 'snap') { if (gameActive) { this.snaps.push({ at: performance.now() / 1000, d }); if (this.snaps.length > 8) this.snaps.shift(); } }
     else if (d.t === 'quit') { this.status('L’hôte a quitté la régate', 'bad'); if (gameActive) quitRace(); }
