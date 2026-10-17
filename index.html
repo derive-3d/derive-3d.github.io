@@ -132,6 +132,7 @@
   #net button { padding: 7px 12px; font-size: 13px; }
   #netCode { font-size: 34px; font-weight: 700; letter-spacing: 6px; color: var(--green); margin: 4px 0; font-variant-numeric: tabular-nums; }
   .netStatus { font-size: 12px; opacity: .8; min-height: 14px; }
+  .netPrivToggle { font-size: 12px; opacity: .6; color: var(--cream); margin-left: auto; text-decoration: underline dotted; } .netPrivToggle:hover { opacity: 1; }
   #netLink { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; margin: 2px 0 6px; } #netLinkTxt { font-family: ui-monospace, Menlo, monospace; user-select: all; opacity: .9; } #netCopy { padding: 4px 10px; font-size: 12px; }
   .netStatus.ok { color: var(--green); opacity: 1; } .netStatus.bad { color: #f0a0a0; opacity: 1; } .netStatus.wait { color: #f2c14e; opacity: 1; }
   #start:disabled { opacity: .5; cursor: default; }
@@ -200,11 +201,14 @@
         </div>
         <div id="best"></div>
         <div id="net"><!-- v9 : jouer a deux (hote autoritaire, WebRTC via PeerJS) -->
-          <div class="netHead">Jouer à plusieurs <span>tous ceux qui ouvrent cette page avec un prénom se retrouvent dans le même salon (6 au plus) ; n’importe qui lance. Partie privée : « Créer une partie » et envoyer le lien</span></div>
+          <div class="netHead">Jouer à plusieurs <span>envoyez le lien de cette page : chacun écrit son prénom et arrive dans le salon (6 au plus), n’importe qui lance</span></div>
           <div class="netRow"><label for="netName">Votre prénom</label><input id="netName" maxlength="14" placeholder="prénom" autocomplete="off"></div>
-          <div class="netRow"><button id="netHost" class="ghost">Créer une partie</button><span id="netJoinRow"><input id="netCodeIn" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false"><button id="netJoin" class="ghost">Rejoindre</button></span><button id="netLeave" class="ghost" style="display:none">Quitter la partie</button></div>
-          <div id="netCode" style="display:none"></div>
-          <div id="netLink" style="display:none"><span id="netLinkTxt"></span><button id="netCopy" class="ghost">Copier le lien d’invitation</button></div>
+          <div class="netRow"><button id="netShare" class="ghost">Copier le lien à envoyer</button><button id="netLeave" class="ghost" style="display:none">Quitter la partie</button><a id="netPrivToggle" href="#" class="netPrivToggle">Partie privée à part…</a></div>
+          <div id="netPriv" style="display:none">
+            <div class="netRow"><button id="netHost" class="ghost">Créer une partie</button><span id="netJoinRow"><input id="netCodeIn" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false"><button id="netJoin" class="ghost">Rejoindre</button></span></div>
+            <div id="netCode" style="display:none"></div>
+            <div id="netLink" style="display:none"><span id="netLinkTxt"></span><button id="netCopy" class="ghost">Copier le lien d’invitation</button></div>
+          </div>
           <div id="netSalon" class="netStatus ok"></div>
           <div id="netStatus" class="netStatus"></div>
         </div>
@@ -4335,10 +4339,12 @@ function bind() {
   $('netCodeIn').addEventListener('keydown', e => { if (e.key === 'Enter') Net.join($('netCodeIn').value); });
   $('netLeave').addEventListener('click', () => Net.leave());
   $('netCopy').addEventListener('click', () => Net.copyInvite());
+  $('netShare').addEventListener('click', () => Net.copySalon());
+  $('netPrivToggle').addEventListener('click', e => { e.preventDefault(); Net.privOpen = !Net.privOpen; Net.uiRole(); });
   try { $('netName').value = localStorage.getItem('regate-3d-name') || ''; } catch (e) { /* rien */ }
   /* v9 lot 2 : arrivee par un lien d'invitation (#CODE) : code pre-rempli ; prenom connu -> on rejoint tout de suite */
   { const hc = Net.fromHash(), sh = Net.salonFromHash();
-    if (hc) { $('netCodeIn').value = hc;
+    if (hc) { $('netCodeIn').value = hc; Net.privOpen = true; Net.uiRole();
       if ($('netName').value.trim()) Net.join(hc);
       else { Net.status('Écrivez votre prénom, puis Entrée : la partie ' + hc + ' vous attend', 'wait'); setTimeout(() => $('netName').focus(), 50); } }
     else if (sh !== 'off') {   // v9 lot 3 : salon commun, tout le monde arrive sur la meme page (#salon=off pour ne pas y entrer, #salon=nom pour un salon a part)
@@ -4400,7 +4406,7 @@ function maskKeys(m, K) { for (const [c, b] of KEY_BITS) K[c] = !!(m & b); retur
 function lerpAng(a, b, k) { return normDeg(a + angDiff(b, a) * k); }
 
 const Net = {
-  role: null, peer: null, code: '', myName: '', connected: false, salon: '', salonTries: 0, _salonTimer: null,
+  role: null, peer: null, code: '', myName: '', connected: false, salon: '', privOpen: false, salonTries: 0, _salonTimer: null,
   /* v9 lot 3 : plusieurs invites chez l'hote ; guests = [{ conn, name, keys, boat }] ; conn / peerName / guestKeys restent des raccourcis sur le premier (tests) */
   guests: [],
   get conn() { return this.guests.length ? this.guests[0].conn : null; },
@@ -4421,6 +4427,15 @@ const Net = {
   inviteUrl(code) {
     const base = (typeof location !== 'undefined' && location.protocol !== 'file:') ? location.origin + location.pathname : NET.publicUrl;
     return base + '#' + (code || this.code);
+  },
+  /* lien du salon (v9, demande Stan 17/10 : « juste un lien pour rentrer dans le salon ») : la page elle-meme ; un salon a part garde son #salon=nom */
+  salonUrl() {
+    const base = (typeof location !== 'undefined' && location.protocol !== 'file:') ? location.origin + location.pathname : NET.publicUrl;
+    return base + (this.salon && this.salon !== NET.salon ? '#salon=' + this.salon : '');
+  },
+  copySalon() {
+    const url = this.salonUrl(), done = () => this.status('Lien copié : envoyez-le, chacun écrit son prénom et arrive dans le salon', 'ok'), fail = () => this.status('Copiez l’adresse de cette page et envoyez-la', 'wait');
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(done, fail); else fail();
   },
   fromHash() { try { const m = /^#([a-z]{4})$/i.exec(location.hash || ''); return m ? m[1].toUpperCase() : ''; } catch (e) { return ''; } },
   /* #salon=NOM : salon a part (tests, ou une bande d'amis) ; #salon=off : pas d'entree automatique */
@@ -4547,6 +4562,8 @@ const Net = {
     $('netLeave').style.display = solo ? 'none' : ''; $('netLeave').textContent = this.salon ? 'Quitter le salon' : 'Quitter la partie';
     $('netHost').style.display = solo || this.salon ? '' : 'none'; $('netJoinRow').style.display = solo || this.salon ? '' : 'none';
     if (this.role !== 'host' || this.salon) this.showInvite(false);
+    /* le code ne sert qu'a une partie privee : range derriere « Partie privee a part… », montre si une partie privee est en cours */
+    const priv = this.role && !this.salon; $('netPriv').style.display = priv || this.privOpen ? '' : 'none'; $('netPrivToggle').style.display = priv ? 'none' : ''; $('netShare').style.display = priv ? 'none' : '';
     const sl = $('netSalon'); if (sl) sl.textContent = this.salon && this.role ? 'Salon' + (this.salon !== NET.salon ? ' « ' + this.salon + ' »' : '') + ' : ' + this.humans().map((h, i) => i === 0 && this.role === 'host' ? h + ' (hôte)' : h).join(', ') + (this.role === 'guest' ? ' (hôte : ' + (this._hostName || '…') + ')' : '') + (n === 1 ? ' · en attendant les autres' : '') : '';
   },
   /* --- hote : reception ------------------------------------------------------------- */
