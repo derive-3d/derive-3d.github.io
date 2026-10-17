@@ -302,7 +302,7 @@
 
 </script>
 <script>
-var BUILD = 'dev'; BUILD = '96ee4588';   // v9 revue 17/10 : horodatage du build pose par bundle.py, compare entre hote et invite (NET.proto / NET.build)
+var BUILD = 'dev'; BUILD = '6cda983d';   // v9 revue 17/10 : horodatage du build pose par bundle.py, compare entre hote et invite (NET.proto / NET.build)
 /* ===========================================================================
    Dérive 3D (ex-Régate 3D, renommé 17/10/2026) : dériveurs en flotte, vent réel avec risées et bascules,
    parcours banane (départ, bouée au vent, porte sous le vent, arrivée).
@@ -4621,7 +4621,7 @@ const Net = {
       let nm = String(d.name || 'Invité').slice(0, 14); const others = [this.myName].concat(this.guests.filter(x => x !== g && x.conn && x.conn.open).map(x => x.name)); const taken = others.filter(h => h === nm).length; if (taken) nm = (nm + ' ' + (taken + 1)).slice(0, 14);
       g.name = nm; this.connected = true;
       this.status(nm + ' est connecté' + (gameActive ? '' : (this.salon ? '' : ' : lancez la régate')), 'ok'); this.uiRole();
-      this.sendTo(g, { t: 'welcome', name: this.myName, salon: this.salon, humans: this.humans(), proto: NET.proto, build: NET.build }); this.who();
+      this.sendTo(g, { t: 'welcome', name: this.myName, you: nm, salon: this.salon, humans: this.humans(), proto: NET.proto, build: NET.build }); this.who();   // you = son prenom tel que l'hote l'a retenu (« Paul 2 » si un Paul etait deja la)
       if (typeof timeScale !== 'undefined') timeScale = 1;   // retour Stan 17/10 : pas de temps x2 x3 a plusieurs
       if (gameActive && race) {   // arrive en cours de manche : il prend la barre d'un bateau ; LUI SEUL recoit le setup (revue 17/10 : avant, tous les invites reconstruisaient leur monde), les autres apprennent le bateau
         this.addGuestBoat(g); this.sendSetupTo(g);
@@ -4722,7 +4722,9 @@ const Net = {
     if (!d || typeof d !== 'object') return;
     if (d.t === 'welcome') {
       if (d.proto !== NET.proto) { this.status('L’hôte a une autre version du jeu (' + (d.build || 'ancienne') + ' ≠ ' + NET.build + ') : rechargez la page tous les deux (Maj + rechargement)', 'bad'); this.badVersion(); return; }
-      this.peerName = String(d.name || 'Hôte').slice(0, 14); this.status('Connecté à ' + this.peerName + (this.salon ? '' : ', en attente du lancement'), 'wait'); this.uiRole();
+      this.peerName = String(d.name || 'Hôte').slice(0, 14); if (d.you) this.myName = String(d.you).slice(0, 14);   // revue 17/10 : prenom retenu par l'hote (sinon « Vous » tombait sur la mauvaise ligne du general et le joueur se listait lui-meme)
+      if (Array.isArray(d.humans)) this._humans = d.humans;
+      this.status('Connecté à ' + this.peerName + (this.salon ? '' : ', en attente du lancement'), 'wait'); this.uiRole();
     }
     else if (d.t === 'badver') { this.status('L’hôte a une autre version du jeu (' + (d.build || '?') + ' ≠ ' + NET.build + ') : rechargez la page tous les deux (Maj + rechargement)', 'bad'); this.badVersion(); }
     else if (d.t === 'full') { this.status('Salon complet (6 joueurs)', 'bad'); this.leaveSalon(); }
