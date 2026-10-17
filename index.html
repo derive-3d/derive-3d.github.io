@@ -73,6 +73,8 @@
   #banner.prot { color: var(--amber); }
   #help { left: 50%; bottom: 14px; transform: translateX(-50%); font-size: 12px; opacity: .8; max-width: calc(100vw - 780px); width: max-content; text-align: center; line-height: 1.7; }   /* plan v8 rang 6 : entre le journal (14 + 360 px) et son symetrique a droite, plus jamais par-dessus le journal */
   #help span { white-space: nowrap; margin: 0 3px; }
+  #help.mini { font-size: 11px; line-height: 1.5; padding: 4px 10px; opacity: .65; }   /* retour Stan 17/10 : le bloc des touches prenait trop de place : une ligne d'essentiels par defaut */
+  #help.mini span:not(.hm) { display: none; } #help:not(.mini) .kmini { display: none; }
   #help kbd { background: rgba(255,255,255,.14); padding: 1px 6px; border-radius: 4px; font-family: inherit; font-size: 11px; margin: 0 2px; }
   #auto { display: none; right: 14px; bottom: 60px; font-size: 12px; padding: 6px 10px; color: var(--amber); }
   #auto.on { display: block; }
@@ -167,7 +169,7 @@
   <div id="top" class="panel"><div id="phase">Départ</div><div id="clock"></div><div id="banner" style="display:none"></div></div>
   <div id="right" class="panel"><canvas id="map" width="220" height="220"></canvas><div id="rank"></div></div>
   <div id="log" class="panel"></div>
-  <div id="help" class="panel"><span><kbd>←</kbd><kbd>→</kbd> barre</span> <span><kbd>↑</kbd><kbd>↓</kbd> écoute</span> <span><kbd>espace</kbd> tout lâcher</span> <span><kbd>Maj</kbd> rappel</span> <span><kbd>B</kbd> pomper</span> <span><kbd>J</kbd> protester</span> <span><kbd>X</kbd> réglage auto</span> <span><kbd>A</kbd> pilote</span> <span><kbd>S</kbd> spi</span> <span><kbd>T</kbd> temps ×2 ×3</span> <span><kbd>H</kbd> instruments</span> <span><kbd>C</kbd> caméra</span> <span><kbd>O</kbd> polaire</span> <span><kbd>M</kbd> carte</span> <span><kbd>L</kbd> classement</span> <span><kbd>K</kbd> masquer les touches</span> <span><kbd>Échap</kbd> menu</span></div>
+  <div id="help" class="panel mini"><span class="hm"><kbd>←</kbd><kbd>→</kbd> barre</span> <span class="hm"><kbd>↑</kbd><kbd>↓</kbd> écoute</span> <span class="hm"><kbd>espace</kbd> tout lâcher</span> <span class="hm"><kbd>Maj</kbd> rappel</span> <span><kbd>B</kbd> pomper</span> <span><kbd>J</kbd> protester</span> <span><kbd>X</kbd> réglage auto</span> <span><kbd>A</kbd> pilote</span> <span><kbd>S</kbd> spi</span> <span><kbd>T</kbd> temps ×2 ×3</span> <span><kbd>H</kbd> instruments</span> <span><kbd>C</kbd> caméra</span> <span><kbd>O</kbd> polaire</span> <span><kbd>M</kbd> carte</span> <span><kbd>L</kbd> classement</span> <span class="hm kmini"><kbd>K</kbd> toutes les touches</span><span class="kfull"><kbd>K</kbd> masquer</span> <span><kbd>Échap</kbd> menu</span></div>   <!-- retour Stan 17/10 : une ligne par defaut, K = toutes les touches, K = masquer, K = une ligne -->
   <div id="auto" class="panel">Pilote automatique (A pour reprendre la barre)</div>
   <div id="pause" class="panel" style="display:none">PAUSE</div>
   <div id="fps" class="panel" style="display:none; right: 14px; bottom: 60px; font-size: 12px; font-variant-numeric: tabular-nums;"></div>
@@ -4242,11 +4244,11 @@ setInterval(() => {
 
 /* --- panneaux masquables (retour Stan 12/10) : M carte, L classement, K barre des touches ; le panneau de droite disparait si les deux
    premiers sont masques ; carte et classement sont retenus d'une manche a l'autre (stockage local, ignore s'il est indisponible) ----------------- */
-const panels = (() => { const d = { map: true, rank: true, help: true }; try { const o = JSON.parse(localStorage.getItem('regate-3d-panels') || '{}'); return Object.assign(d, { map: o.map !== false, rank: o.rank !== false }); } catch (e) { return d; } })();   // la barre des touches revient a chaque lancement : K la cache, et c'est elle qui dit K
+const panels = (() => { const d = { map: true, rank: true, help: 'mini' };   /* help : 'mini' (une ligne), 'full', false ; jamais memorise */ try { const o = JSON.parse(localStorage.getItem('regate-3d-panels') || '{}'); return Object.assign(d, { map: o.map !== false, rank: o.rank !== false }); } catch (e) { return d; } })();   // la barre des touches revient a chaque lancement : K la cache, et c'est elle qui dit K
 function applyPanels() {
   $('map').style.display = panels.map ? '' : 'none'; $('rank').style.display = panels.rank ? '' : 'none';
   $('right').style.display = panels.map || panels.rank ? '' : 'none'; $('right').classList.toggle('nomap', !panels.map);
-  $('help').style.visibility = panels.help ? '' : 'hidden';
+  $('help').style.visibility = panels.help ? '' : 'hidden'; $('help').classList.toggle('mini', panels.help === 'mini');
   try { localStorage.setItem('regate-3d-panels', JSON.stringify({ map: panels.map, rank: panels.rank })); } catch (e) { /* rien */ }
 }
 /* --- evenements ---------------------------------------------------------------- */
@@ -4268,7 +4270,8 @@ function bind() {
     if (k === 'c') camMode = (camMode + 1) % 3;
     if (k === 'p' && !pauseShown) { paused = !paused; $('pause').style.display = paused ? '' : 'none'; }
     if (k === 'a') { player.setAutopilot(!player.autopilot); $('auto').classList.toggle('on', player.autopilot); }   // lot PR : A prend aussi le spi
-    if (k === 'm' || k === 'l' || k === 'k') { const w = k === 'm' ? 'map' : k === 'l' ? 'rank' : 'help'; panels[w] = !panels[w]; applyPanels(); }   // retour Stan 12/10 : carte, classement et touches se masquent chacun
+    if (k === 'm' || k === 'l') { const w = k === 'm' ? 'map' : 'rank'; panels[w] = !panels[w]; applyPanels(); }
+    if (k === 'k') { panels.help = panels.help === 'mini' ? 'full' : panels.help === 'full' ? false : 'mini'; applyPanels(); }   // retour Stan 17/10 : une ligne -> toutes -> masque   // retour Stan 12/10 : carte, classement et touches se masquent chacun
     if (k === 't') timeScale = timeScale >= 3 ? 1 : timeScale + 1;
     if (k === 'v') soundToggle();
     if (k === 'f') { const f = $('fps'); f.style.display = f.style.display === 'none' ? '' : 'none'; }
