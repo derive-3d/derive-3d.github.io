@@ -130,6 +130,7 @@
   #net button { padding: 7px 12px; font-size: 13px; }
   #netCode { font-size: 34px; font-weight: 700; letter-spacing: 6px; color: var(--green); margin: 4px 0; font-variant-numeric: tabular-nums; }
   .netStatus { font-size: 12px; opacity: .8; min-height: 14px; }
+  #netLink { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; margin: 2px 0 6px; } #netLinkTxt { font-family: ui-monospace, Menlo, monospace; user-select: all; opacity: .9; } #netCopy { padding: 4px 10px; font-size: 12px; }
   .netStatus.ok { color: var(--green); opacity: 1; } .netStatus.bad { color: #f0a0a0; opacity: 1; } .netStatus.wait { color: #f2c14e; opacity: 1; }
   #start:disabled { opacity: .5; cursor: default; }
 #labels{position:fixed;inset:0;pointer-events:none;z-index:0}
@@ -197,10 +198,11 @@
         </div>
         <div id="best"></div>
         <div id="net"><!-- v9 : jouer a deux (hote autoritaire, WebRTC via PeerJS) -->
-          <div class="netHead">Jouer à deux <span>internet des deux côtés : l’un crée la partie, l’autre entre le code</span></div>
+          <div class="netHead">Jouer à deux <span>internet des deux côtés : l’un crée la partie et envoie son lien, l’autre clique dessus (ou entre le code)</span></div>
           <div class="netRow"><label for="netName">Votre prénom</label><input id="netName" maxlength="14" placeholder="prénom" autocomplete="off"></div>
           <div class="netRow"><button id="netHost" class="ghost">Créer une partie</button><span id="netJoinRow"><input id="netCodeIn" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false"><button id="netJoin" class="ghost">Rejoindre</button></span><button id="netLeave" class="ghost" style="display:none">Quitter la partie</button></div>
           <div id="netCode" style="display:none"></div>
+          <div id="netLink" style="display:none"><span id="netLinkTxt"></span><button id="netCopy" class="ghost">Copier le lien d’invitation</button></div>
           <div id="netStatus" class="netStatus"></div>
         </div>
         <button id="start">Lancer la régate</button>
@@ -3110,7 +3112,7 @@ function updateCrew(b, M, t) {
   }
   posePerson(C.helm, H, dir, handSheet, handTiller, feet, kneeLift, look, pitch);
   /* stick de barre : du bout du tiller a la main arriere */
-  const tillerEnd = { x: Math.sin(b.rudder * 0.6) * 1.0, y: D.tillerY, z: L / 2 - 0.06 - Math.cos(b.rudder * 0.6) * 1.0 };   // bout avant du tiller, dans le repere coque
+  const tillerEnd = { x: -Math.sin(b.rudder * 0.6) * 1.0, y: D.tillerY, z: L / 2 - 0.06 - Math.cos(b.rudder * 0.6) * 1.0 };   // bout avant du tiller, dans le repere coque (meme sens que le groupe barre+safran)
   limb(C.ext, tillerEnd, C.helm.handB, C.ext.userData.r);
   /* ecoute de GV : milieu de bome -> poulie de pont (devant le cockpit) -> main avant du barreur */
   {
@@ -3452,8 +3454,8 @@ function syncBoat(b, t) {
   }
   updateSpray(b, M, t);
   updateCrew(b, M, t);
-  M.tiller.userData.group.rotation.y = -b.rudder * 0.6;   // barre au vent : le tiller va du cote oppose au virage
-  if (M.ghost) { M.ghost.visible = !b.autopilot && b.capsize <= 0 && b.manoeuvre <= 0 && Math.abs(b.helmHold) > 0.04; M.ghost.rotation.y = -b.helmHold * 0.6; }
+  M.tiller.userData.group.rotation.y = b.rudder * 0.6;    // rudder > 0 = virage a tribord : le tiller part a babord, la pale a tribord (retour Stan 16/10/2026 : c'etait l'inverse)
+  if (M.ghost) { M.ghost.visible = !b.autopilot && b.capsize <= 0 && b.manoeuvre <= 0 && Math.abs(b.helmHold) > 0.04; M.ghost.rotation.y = b.helmHold * 0.6; }
   /* contre-jour : la voile entre la camera et le soleil s'eclaire par transparence */
   { const sp = _sp.set(b.x, 3.5, b.z); const toCam = _tc.copy(camera.position).sub(sp).normalize();
     const back = clamp(-SUN_DIR.dot(toCam), 0, 1);
@@ -4321,7 +4323,14 @@ function bind() {
   $('netJoin').addEventListener('click', () => Net.join($('netCodeIn').value));
   $('netCodeIn').addEventListener('keydown', e => { if (e.key === 'Enter') Net.join($('netCodeIn').value); });
   $('netLeave').addEventListener('click', () => Net.leave());
+  $('netCopy').addEventListener('click', () => Net.copyInvite());
   try { $('netName').value = localStorage.getItem('regate-3d-name') || ''; } catch (e) { /* rien */ }
+  /* v9 lot 2 : arrivee par un lien d'invitation (#CODE) : code pre-rempli ; prenom connu -> on rejoint tout de suite */
+  { const hc = Net.fromHash();
+    if (hc) { $('netCodeIn').value = hc;
+      if ($('netName').value.trim()) Net.join(hc);
+      else { Net.status('Écrivez votre prénom, puis Entrée : la partie ' + hc + ' vous attend', 'wait'); setTimeout(() => $('netName').focus(), 50); } }
+    $('netName').addEventListener('keydown', e => { if (e.key === 'Enter' && /^[a-z]{4}$/i.test($('netCodeIn').value.trim()) && !Net.role) { $('netName').dispatchEvent(new Event('change')); Net.join($('netCodeIn').value); } }); }
   $('netName').addEventListener('change', () => { try { localStorage.setItem('regate-3d-name', $('netName').value.trim()); } catch (e) { /* rien */ } });
   $('toMenu').addEventListener('click', quitRace);
   /* Safari allume le temoin micro de macOS des qu'une page ouvre un contexte Web Audio : son coupe par defaut */
@@ -4361,7 +4370,7 @@ window.addEventListener('load', () => {
      invite -> hote : { t:'hello', name } · { t:'keys', k:masque } · { t:'tog', w:'auto'|'trim'|'spi'|'pump'|'protest' }
      hote -> invite : { t:'welcome', name } · { t:'setup', ... } · { t:'snap', ... } · { t:'quit' }
    =========================================================================== */
-const NET = { hz: 15, delay: 0.12, prefix: 'regate3d-', alphabet: 'ABCDEFGHJKLMNPQRSTUVWXYZ' };
+const NET = { hz: 15, delay: 0.12, prefix: 'regate3d-', alphabet: 'ABCDEFGHJKLMNPQRSTUVWXYZ', publicUrl: 'https://derive-3d.github.io/' };
 /* champs d'un bateau dans un instantane, dans cet ordre (pack et unpack symetriques) */
 const NET_F = {
   lerp: ['x', 'z', 'spd', 'gx', 'gz', 'rudder', 'sheet', 'heel', 'roll', 'hike', 'hikeEff', 'spiUp', 'planing', 'helmHold', 'helmAngle', 'leeway', 'sheetManual', 'easeHold'],
@@ -4380,15 +4389,32 @@ const Net = {
   status(txt, cls) { const el = $('netStatus'); if (el) { el.textContent = txt; el.className = 'netStatus ' + (cls || ''); } },
   name() { const el = $('netName'); const v = el && el.value.trim(); return v ? v.slice(0, 14) : (this.role === 'host' ? 'Hôte' : 'Invité'); },
   genCode() { let c = ''; for (let i = 0; i < 4; i++) c += NET.alphabet[Math.floor(Math.random() * NET.alphabet.length)]; return c; },
+  /* v9 lot 2 : code stable par navigateur (le lien d'invitation ne change pas d'une fois sur l'autre) */
+  myCode(renew) {
+    let c = ''; try { c = renew ? '' : (localStorage.getItem('regate-3d-code') || ''); } catch (e) { /* rien */ }
+    if (!/^[A-Z]{4}$/.test(c) || [...c].some(ch => !NET.alphabet.includes(ch))) { c = this.genCode(); try { localStorage.setItem('regate-3d-code', c); } catch (e) { /* rien */ } }
+    return c;
+  },
+  inviteUrl(code) {
+    const base = (typeof location !== 'undefined' && location.protocol !== 'file:') ? location.origin + location.pathname : NET.publicUrl;
+    return base + '#' + (code || this.code);
+  },
+  fromHash() { try { const m = /^#([a-z]{4})$/i.exec(location.hash || ''); return m ? m[1].toUpperCase() : ''; } catch (e) { return ''; } },
+  copyInvite() {
+    const url = this.inviteUrl(), done = () => this.status('Lien copié : envoyez-le, votre adversaire n’aura qu’à cliquer', 'ok');
+    const fallback = () => { try { const r = document.createRange(); r.selectNodeContents($('netLinkTxt')); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); if (document.execCommand('copy')) done(); else this.status('Copiez le lien affiché', 'wait'); } catch (e) { this.status('Copiez le lien affiché', 'wait'); } };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(done, fallback); else fallback();
+  },
+  showInvite(on) { const el = $('netLink'); if (!el) return; el.style.display = on ? '' : 'none'; if (on) $('netLinkTxt').textContent = this.inviteUrl(); },
   hasPeer() { return typeof Peer !== 'undefined'; },
   /* --- creer une partie : l'hote attend l'invite ----------------------------------- */
   host() {
     if (!this.hasPeer()) return this.status('Bibliothèque réseau absente', 'bad');
     this.leave(true);
-    this.role = 'host'; this.myName = this.name(); this.code = this.genCode();
+    this.role = 'host'; this.myName = this.name(); this.code = this.myCode(this._renewCode); this._renewCode = false;
     this.status('Connexion au serveur de mise en relation…');
     const p = this.peer = new Peer(NET.prefix + this.code, { debug: 1 });
-    p.on('open', () => { this.status('Code de la partie : ' + this.code + ' · en attente de votre adversaire', 'wait'); $('netCode').textContent = this.code; $('netCode').style.display = ''; });
+    p.on('open', () => { this._retried = false; this.status('En attente de votre adversaire : envoyez-lui le lien (ou le code ' + this.code + ')', 'wait'); $('netCode').textContent = this.code; $('netCode').style.display = ''; this.showInvite(true); });
     p.on('connection', c => {
       if (this.conn && this.conn.open) { c.close(); return; }   // une seule place
       this.conn = c;
@@ -4397,7 +4423,13 @@ const Net = {
       c.on('close', () => this.onPeerLost());
       c.on('error', e => this.status('Erreur de liaison : ' + (e && e.message || e), 'bad'));
     });
-    p.on('error', e => this.onPeerError(e));
+    p.on('error', e => {
+      if (e && e.type === 'unavailable-id' && this.role === 'host' && !this.connected) {
+        if (!this._retried) { this._retried = true; this.status('Code occupé, nouvel essai…', 'wait'); setTimeout(() => { if (this.role === 'host' && !this.connected) this.host(); }, 1500); return; }
+        this._retried = false; this._renewCode = true; this.status('Code occupé : nouveau code, votre lien d’invitation change', 'wait'); setTimeout(() => { if (this.role === 'host' && !this.connected) this.host(); }, 300); return;
+      }
+      this.onPeerError(e);
+    });
     p.on('disconnected', () => { if (this.role === 'host' && !this.connected) this.status('Serveur de mise en relation perdu, recréez la partie', 'bad'); });
     this.uiRole();
   },
@@ -4444,7 +4476,7 @@ const Net = {
     try { if (this.peer) this.peer.destroy(); } catch (e) { /* rien */ }
     this.conn = null; this.peer = null; this.connected = false; this.role = null; this.peerName = ''; this.snaps = []; this.lastMask = -1; this.evSeqSent = -1; this.incSent = -1; this.sentSetup = false;
     this.stopClock();
-    if (!keepUi) { this.status(''); $('netCode').style.display = 'none'; this.uiRole(); }
+    if (!keepUi) { this.status(''); $('netCode').style.display = 'none'; this.showInvite(false); this.uiRole(); }
   },
   send(o) { if (this.conn && this.conn.open) { try { this.conn.send(o); } catch (e) { /* liaison fermee entre deux images */ } } },
   guestBoat() { return fleet.find(b => b.isHuman && !b.isPlayer) || null; },
@@ -4455,6 +4487,7 @@ const Net = {
     start.disabled = this.role === 'guest';
     $('netLeave').style.display = solo ? 'none' : '';
     $('netHost').style.display = solo ? '' : 'none'; $('netJoinRow').style.display = solo ? '' : 'none';
+    if (this.role !== 'host') this.showInvite(false);
   },
   /* --- hote : reception -------------------------------------------------------------- */
   onHostData(d) {
