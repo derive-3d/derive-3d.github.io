@@ -302,6 +302,7 @@
 
 </script>
 <script>
+var BUILD = 'dev'; BUILD = '96ee4588';   // v9 revue 17/10 : horodatage du build pose par bundle.py, compare entre hote et invite (NET.proto / NET.build)
 /* ===========================================================================
    Dérive 3D (ex-Régate 3D, renommé 17/10/2026) : dériveurs en flotte, vent réel avec risées et bascules,
    parcours banane (départ, bouée au vent, porte sous le vent, arrivée).
@@ -2285,7 +2286,7 @@ let pumpFlash = -99, polarOn = false, hudFull = false, pauseShown = false;
 const SHARED_GPU = new Set();   // geometries et textures partagees par toute la flotte : jamais disposees par newRace
 function releaseKeys() { for (const k in keys) keys[k] = false; }   // perte de focus ou menu : aucune touche ne reste « enfoncee » (revue, point 11)
 function pauseMenu(show) { pauseShown = show; paused = show; $('pauseMenu').style.display = show ? '' : 'none'; $('pause').style.display = 'none'; if (show) releaseKeys(); }
-function quitRace() { if (Net.role === 'host') { Net.send({ t: 'quit' }); Net.stopClock(); } else if (Net.role === 'guest') { if (Net.salon) Net.send({ t: 'left' }); else Net.leave(); }   /* v9 lot 3 : dans le salon, quitter la manche ne quitte pas le salon */ pauseMenu(false); gameActive = false; releaseKeys(); $('menu').style.display = ''; $('hud').style.display = 'none'; $('end').style.display = 'none'; delete $('end').dataset.shown; showBest(); }
+function quitRace() { if (Net.role === 'host') { Net.send({ t: 'quit' }); Net.stopClock(); } else if (Net.role === 'guest') { if (Net.salon) Net.send({ t: 'left' }); else Net.leave(); }   /* v9 lot 3 : dans le salon, quitter la manche ne quitte pas le salon */ pauseMenu(false); gameActive = false; releaseKeys(); $('menu').style.display = ''; $('hud').style.display = 'none'; $('end').style.display = 'none'; delete $('end').dataset.shown; showBest(); Net.afterRace(); }
 let opts = { boats: 6, wind: 12, laps: 2, cls: 'ilca7', beat: 350, trim: 'manual', sea: 'abritee', format: 'series', level: 'ligue' };
 /* plan v8 rang 17 (roast 8, game design C3) : niveau de la flotte au menu = plage du niveau (skill) des adversaires ; ligue = l'ancien tirage */
 const LEVELS = { club: [0.35, 0.65], ligue: [0.6, 1.0], national: [0.85, 1.0] };
@@ -4404,6 +4405,11 @@ const KEY_BITS = [['ArrowLeft', 1], ['ArrowRight', 2], ['ArrowUp', 4], ['ArrowDo
 function keyMask(K) { let m = 0; for (const [c, b] of KEY_BITS) if (K[c]) m |= b; return m; }
 function maskKeys(m, K) { for (const [c, b] of KEY_BITS) K[c] = !!(m & b); return K; }   // les deux Maj arrivent separement, applyKeys accepte l'une ou l'autre
 function lerpAng(a, b, k) { return normDeg(a + angDiff(b, a) * k); }
+/* revue 17/10 : identifiant de protocole = empreinte de la liste des champs et des messages ; deux builds qui ne l'ont pas en commun
+   depaqueteraient n'importe quoi en silence (joueurs sur deux versions du site, cache Pages ~10 min). BUILD = horodatage pose par bundle.py. */
+NET.proto = (() => { const s = JSON.stringify(NET_F) + JSON.stringify(KEY_BITS) + 'hello,keys,tog,left,start,welcome,setup,boat,snap,quit,full,badver'; let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0; return h.toString(36); })();
+NET.build = typeof BUILD !== 'undefined' ? BUILD : 'dev';
+NET.turn = [];   // relais TURN : [{ urls: ['turn:hote:3478'], username, credential }] ; vide = aucun connu qui marche (voir Net.peerOpts)
 
 const Net = {
   role: null, peer: null, code: '', myName: '', connected: false, salon: '', privOpen: false, salonTries: 0, _salonTimer: null,
@@ -4447,7 +4453,36 @@ const Net = {
   },
   showInvite(on) { const el = $('netLink'); if (!el) return; el.style.display = on ? '' : 'none'; if (on) $('netLinkTxt').textContent = this.inviteUrl(); },
   hasPeer() { return typeof Peer !== 'undefined'; },
-  humans() { return [this.myName].concat(this.guests.filter(g => g.conn && g.conn.open).map(g => g.name)).filter(Boolean); },
+  /* options du Peer. Relais TURN : AUCUN qui marche au 17/10/2026 (les `turn:eu-0/us-0.turn.peerjs.com` que PeerJS embarque ne se resolvent
+     plus en DNS, `openrelay.metered.ca` pointe sur 192.0.2.1 = reseau de documentation, mort) : deux joueurs derriere un NAT symetrique
+     (partage mobile, certains reseaux d'entreprise) ne se joindront pas. Le jour ou Stan a un TURN (compte metered.ca gratuit 20 Go/mois,
+     Cloudflare Calls...), le mettre dans NET.turn : il sert a toutes les liaisons, et `localStorage regate-3d-relay = 1` (RELAY=1 net_e2e)
+     force le relais pour le prouver. */
+  peerOpts() {
+    const o = { debug: 1 }; let relay = false;
+    try { relay = localStorage.getItem('regate-3d-relay') === '1'; } catch (e) { /* rien */ }
+    const turn = NET.turn || [];
+    if (relay) o.config = { iceServers: turn, iceTransportPolicy: 'relay' };
+    else if (turn.length) o.config = { iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }].concat(turn) };
+    return o;
+  },
+  /* revue 17/10 : le broker coupe la prise (veille, wifi, 10 min de course) -> l'identifiant du salon est libere et le prochain arrivant
+     ouvre un DEUXIEME salon ; les liaisons WebRTC deja etablies, elles, tiennent. On se reinscrit (peer.reconnect, meme identifiant),
+     avec un delai qui double a chaque echec. En cours de partie, ne jamais detruire le Peer pour un ennui de broker. */
+  watchBroker(p) {
+    p.on('disconnected', () => {
+      if (this.peer !== p || p.destroyed) return;
+      const wait = this._reconWait = Math.min((this._reconWait || 0.5) * 2, 30);
+      if (this.role === 'host' && !this.connected && !this.salon) this.status('Serveur de mise en relation perdu, reconnexion…', 'wait');
+      setTimeout(() => { if (this.peer === p && !p.destroyed && p.disconnected) { try { p.reconnect(); } catch (e) { /* rien */ } } }, wait * 1000);
+    });
+    p.on('open', () => { this._reconWait = 0; });
+  },
+  live() { return this.connected || (typeof gameActive !== 'undefined' && gameActive); },   // une liaison tient ou une manche tourne : un ennui de broker ne doit rien casser
+  /* fin de manche : l'hote seul dans le salon dont l'identifiant a ete repris pendant sa course (broker perdu, un autre a ouvert le salon) y retourne, en invite s'il le faut */
+  afterRace() { if (this.role === 'host' && this.salon && !this.connected && this.peer && this.peer.disconnected) { const s = this.salon; this.leave(true); this.enterSalon(s); } },
+  humans() { if (this.role === 'guest' && this._humans) return this._humans.slice(); return [this.myName].concat(this.guests.filter(g => g.conn && g.conn.open).map(g => g.name)).filter(Boolean); },   // invite : la liste que l'hote envoie (who)
+  who() { if (this.role === 'host') this.send({ t: 'who', humans: this.humans() }); },   // revue 17/10 : les invites voient qui est dans le salon, arrivees et departs compris
   /* --- salon commun (v9 lot 3, demande Stan 17/10 : « tout le monde arrive sur la meme page ») -----
      identifiant fixe sur le broker : le premier arrive tient le salon (hote), les suivants s'y connectent (invites).
      Hote disparu : les invites reviennent au menu et retentent, l'un d'eux devient hote. Identifiant mort chez le
@@ -4467,9 +4502,11 @@ const Net = {
     this.leave(true);
     this.role = 'host'; this.myName = this.name(); this.code = fixedId ? '' : this.myCode(this._renewCode); this._renewCode = false;
     this.status(fixedId ? 'Entrée dans le salon…' : 'Connexion au serveur de mise en relation…');
-    const p = this.peer = new Peer(fixedId || NET.prefix + this.code, { debug: 1 });
+    const p = this.peer = new Peer(fixedId || NET.prefix + this.code, this.peerOpts());
+    this.watchBroker(p);
     p.on('open', () => {
       this._retried = false; this.salonTries = 0;
+      if (this.live()) return;   // reinscription au broker en cours de partie : rien a redire
       if (fixedId) { this.status('Salon ouvert : vous êtes l’hôte, les autres arrivent tout seuls', 'wait'); }
       else { this.status('En attente de votre adversaire : envoyez-lui le lien (ou le code ' + this.code + ')', 'wait'); $('netCode').textContent = this.code; $('netCode').style.display = ''; this.showInvite(true); }
       this.uiRole();
@@ -4485,15 +4522,16 @@ const Net = {
       c.on('error', e => this.status('Erreur de liaison : ' + (e && e.message || e), 'bad'));
     });
     p.on('error', e => {
-      if (e && e.type === 'unavailable-id' && this.role === 'host' && !this.connected) {
+      const type = e && e.type || '';
+      if (this.live() && (type === 'network' || type === 'server-error' || type === 'unavailable-id' || type === 'socket-error' || type === 'socket-closed')) return;   // broker perdu en cours de partie : watchBroker se reinscrit, les liaisons tiennent
+      if (type === 'unavailable-id' && this.role === 'host' && !this.connected) {
         if (fixedId) { this.leave(true); this.join(fixedId, true); return; }   // salon deja tenu : on y entre en invite
         if (!this._retried) { this._retried = true; this.status('Code occupé, nouvel essai…', 'wait'); setTimeout(() => { if (this.role === 'host' && !this.connected) this.host(); }, 1500); return; }
         this._retried = false; this._renewCode = true; this.status('Code occupé : nouveau code, votre lien d’invitation change', 'wait'); setTimeout(() => { if (this.role === 'host' && !this.connected) this.host(); }, 300); return;
       }
-      if (fixedId && (e && (e.type === 'network' || e.type === 'server-error'))) { this.leave(true); this.role = null; this.status('Serveur de mise en relation injoignable, nouvel essai…', 'wait'); this.salonRetry(4000); return; }
+      if (fixedId && (type === 'network' || type === 'server-error')) { this.leave(true); this.role = null; this.status('Serveur de mise en relation injoignable, nouvel essai…', 'wait'); this.salonRetry(4000); return; }
       this.onPeerError(e);
     });
-    p.on('disconnected', () => { if (this.role === 'host' && !this.connected) this.status('Serveur de mise en relation perdu, recréez la partie', 'bad'); });
     this.uiRole();
   },
   /* --- rejoindre : l'invite se connecte au code (ou a l'identifiant fixe du salon) ---- */
@@ -4505,18 +4543,22 @@ const Net = {
     this.leave(true);
     this.role = 'guest'; this.myName = this.name(); this.code = fixed ? '' : code;
     this.status(fixed ? 'Salon trouvé, connexion à l’hôte…' : 'Connexion…');
-    const p = this.peer = new Peer({ debug: 1 });
+    const p = this.peer = new Peer(this.peerOpts());
+    this.watchBroker(p);
     p.on('open', () => {
+      if (this.guests.length) return;   // reinscription au broker (watchBroker) : la liaison avec l'hote existe deja
       const c = p.connect(id, { reliable: true, serialization: 'json' });
       this.guests = [{ conn: c, name: '', keys: {}, boat: null }];
       const to = setTimeout(() => { if (!this.connected) { if (fixed) { this.leave(true); this.role = null; this.status('Salon sans réponse, nouvel essai…', 'wait'); this.salonRetry(2500); } else this.status('Pas de réponse : code inconnu, ou liaison directe impossible depuis ce réseau', 'bad'); } }, fixed ? 8000 : 12000);
-      c.on('open', () => { clearTimeout(to); this.connected = true; this.salonTries = 0; this.send({ t: 'hello', name: this.myName }); this.status('Connecté, en attente du lancement par l’hôte', 'wait'); this.uiRole(); });
+      c.on('open', () => { clearTimeout(to); this.connected = true; this.salonTries = 0; this.send({ t: 'hello', name: this.myName, proto: NET.proto, build: NET.build }); this.status('Connecté, en attente du lancement par l’hôte', 'wait'); this.uiRole(); });
       c.on('data', d => this.onGuestData(d));
       c.on('close', () => this.onPeerLost());
       c.on('error', e => this.status('Erreur de liaison : ' + (e && e.message || e), 'bad'));
     });
     p.on('error', e => {
-      if (fixed && e && (e.type === 'peer-unavailable' || e.type === 'network' || e.type === 'server-error')) { this.leave(true); this.role = null; this.status('Salon vide ou endormi, nouvel essai…', 'wait'); this.salonRetry(3000); return; }
+      const type = e && e.type || '';
+      if (this.connected && (type === 'network' || type === 'server-error' || type === 'socket-error' || type === 'socket-closed')) return;   // broker perdu une fois relie a l'hote : sans effet sur la partie, watchBroker se reinscrit
+      if (fixed && (type === 'peer-unavailable' || type === 'network' || type === 'server-error')) { this.leave(true); this.role = null; this.status('Salon vide ou endormi, nouvel essai…', 'wait'); this.salonRetry(3000); return; }
       this.onPeerError(e);
     });
     this.uiRole();
@@ -4533,7 +4575,7 @@ const Net = {
       this.guests = this.guests.filter(x => x.conn && x.conn.open);
       this.connected = this.guests.length > 0;
       this.status((g && g.name ? g.name : 'Votre adversaire') + ' a quitté la partie' + (this.connected ? ' · ' + this.humans().slice(1).join(', ') + ' encore là' : ''), this.connected ? 'wait' : 'bad');
-      this.uiRole();
+      this.uiRole(); this.who();
     } else {
       const wasSalon = this.salon;
       this.connected = false;
@@ -4547,6 +4589,7 @@ const Net = {
     for (const g of this.guests) { try { if (g.conn) g.conn.close(); } catch (e) { /* rien */ } }
     try { if (this.peer) this.peer.destroy(); } catch (e) { /* rien */ }
     this.guests = []; this.peer = null; this.connected = false; this.role = null; this._hostName = ''; this._pendingName = ''; this.snaps = []; this.lastMask = -1; this.evSeqSent = -1; this.incSent = -1; this.sentSetup = false;
+    this._humans = null; this.clockOff = null; this.jitter = 0; this.delayNow = null; this._wasPaused = false; this._reconWait = 0;
     this.stopClock();
     if (!keepUi) { this.leaveSalon(); this.status(''); $('netCode').style.display = 'none'; this.showInvite(false); this.uiRole(); }
   },
@@ -4571,12 +4614,19 @@ const Net = {
     if (!d || typeof d !== 'object') return;
     if (!g) g = this.guests[0] || (this.guests.push({ conn: this.conn, name: '', keys: {}, boat: null }), this.guests[0]);
     if (d.t === 'hello') {
+      if (d.proto !== NET.proto) {   // versions differentes : on le dit et on le laisse partir (sinon ses instantanes seraient depaquetes de travers)
+        this.status(String(d.name || 'Un invité').slice(0, 14) + ' a une autre version du jeu (' + (d.build || '?') + ' ≠ ' + NET.build + ') : il doit recharger la page', 'bad');
+        this.sendTo(g, { t: 'badver', build: NET.build, proto: NET.proto }); setTimeout(() => { try { if (g.conn) g.conn.close(); } catch (e) { /* rien */ } }, 800); return;
+      }
       let nm = String(d.name || 'Invité').slice(0, 14); const others = [this.myName].concat(this.guests.filter(x => x !== g && x.conn && x.conn.open).map(x => x.name)); const taken = others.filter(h => h === nm).length; if (taken) nm = (nm + ' ' + (taken + 1)).slice(0, 14);
       g.name = nm; this.connected = true;
       this.status(nm + ' est connecté' + (gameActive ? '' : (this.salon ? '' : ' : lancez la régate')), 'ok'); this.uiRole();
-      this.sendTo(g, { t: 'welcome', name: this.myName, salon: this.salon, humans: this.humans() });
+      this.sendTo(g, { t: 'welcome', name: this.myName, salon: this.salon, humans: this.humans(), proto: NET.proto, build: NET.build }); this.who();
       if (typeof timeScale !== 'undefined') timeScale = 1;   // retour Stan 17/10 : pas de temps x2 x3 a plusieurs
-      if (gameActive && race) { this.addGuestBoat(g); this.sendSetup(); }   // arrive en cours de manche : il prend la barre d'un bateau
+      if (gameActive && race) {   // arrive en cours de manche : il prend la barre d'un bateau ; LUI SEUL recoit le setup (revue 17/10 : avant, tous les invites reconstruisaient leur monde), les autres apprennent le bateau
+        this.addGuestBoat(g); this.sendSetupTo(g);
+        if (g.boat) for (const o of this.guests) if (o !== g) this.sendTo(o, { t: 'boat', id: g.boat.id, name: g.boat.name, human: true, humans: this.humans() });
+      }
     } else if (d.t === 'keys') { maskKeys(d.k | 0, g.keys); }
     else if (d.t === 'left') { const gb = g.boat; if (gb && gameActive && fleet.includes(gb) && !gb.autopilot) { gb.setAutopilot(true); if (race) race.say(gb, 'a quitté la manche : pilote automatique'); } g.boat = null; this.status((g.name || 'Un invité') + ' a quitté la manche, reste dans le salon', 'wait'); }
     else if (d.t === 'start') { if (this.salon && !gameActive && typeof hostStart === 'function') { this.status((g.name || 'Un invité') + ' lance la régate', 'ok'); hostStart(); } }
@@ -4612,12 +4662,16 @@ const Net = {
   },
   sendSetup() {
     if (this.role !== 'host' || !race) return;
-    this.evSeqSent = -1; this.incSent = -1; this.sentSetup = true;
-    for (const g of this.guests) {
-      if (!g.boat || !fleet.includes(g.boat)) g.boat = fleet.find(b => b.isHuman && !b.isPlayer && b.name === g.name) || null;   // flotte construite par newRace : le bateau porte son prenom
-      this.sendTo(g, this.setupFor(g));
-    }
+    for (const g of this.guests) this.sendSetupTo(g, true);
     this.sendSnap(true);
+  },
+  /* setup a un seul invite (nouvelle manche pour tous, ou arrivee en cours de manche) ; le journal repart de zero au prochain instantane pour que lui l'ait */
+  sendSetupTo(g, noSnap) {
+    if (this.role !== 'host' || !race) return;
+    this.evSeqSent = -1; this.incSent = -1; this.sentSetup = true;
+    if (!g.boat || !fleet.includes(g.boat)) g.boat = fleet.find(b => b.isHuman && !b.isPlayer && b.name === g.name) || null;   // flotte construite par newRace : le bateau porte son prenom
+    this.sendTo(g, this.setupFor(g));
+    if (!noSnap) this.sendSnap(true);
   },
   packBoat(b) {
     const o = [b.id];
@@ -4666,20 +4720,45 @@ const Net = {
   /* --- invite : reception ------------------------------------------------------------- */
   onGuestData(d) {
     if (!d || typeof d !== 'object') return;
-    if (d.t === 'welcome') { this.peerName = String(d.name || 'Hôte').slice(0, 14); this.status('Connecté à ' + this.peerName + (this.salon ? '' : ', en attente du lancement'), 'wait'); this.uiRole(); }
+    if (d.t === 'welcome') {
+      if (d.proto !== NET.proto) { this.status('L’hôte a une autre version du jeu (' + (d.build || 'ancienne') + ' ≠ ' + NET.build + ') : rechargez la page tous les deux (Maj + rechargement)', 'bad'); this.badVersion(); return; }
+      this.peerName = String(d.name || 'Hôte').slice(0, 14); this.status('Connecté à ' + this.peerName + (this.salon ? '' : ', en attente du lancement'), 'wait'); this.uiRole();
+    }
+    else if (d.t === 'badver') { this.status('L’hôte a une autre version du jeu (' + (d.build || '?') + ' ≠ ' + NET.build + ') : rechargez la page tous les deux (Maj + rechargement)', 'bad'); this.badVersion(); }
     else if (d.t === 'full') { this.status('Salon complet (6 joueurs)', 'bad'); this.leaveSalon(); }
-    else if (d.t === 'setup') { this.snaps = []; netGuestStart(d); }
-    else if (d.t === 'snap') { if (gameActive) { this.snaps.push({ at: performance.now() / 1000, d }); if (this.snaps.length > 8) this.snaps.shift(); } }
+    else if (d.t === 'setup') { this.snaps = []; this.clockOff = null; this.jitter = 0; this.delayNow = null; this._wasPaused = false; netGuestStart(d); }
+    else if (d.t === 'snap') { if (gameActive) { this.pushSnap(d); } }
+    else if (d.t === 'boat') {   // un autre invite arrive en cours de manche et prend ce bateau (revue 17/10 : plus de setup pour tout le monde)
+      const bt = fleet.find(x => x.id === d.id); if (bt) { bt.name = d.name; bt.isHuman = !!d.human; } if (d.humans) this._humans = d.humans; this.uiRole();
+    }
+    else if (d.t === 'who') { this._humans = Array.isArray(d.humans) ? d.humans : null; this.uiRole(); }
     else if (d.t === 'quit') { this.status('L’hôte a quitté la régate', 'bad'); if (gameActive) quitRace(); }
+  },
+  badVersion() { const wasSalon = this.salon; this.leave(true); this.role = null; if (wasSalon) this.leaveSalon(); this.uiRole(); },   // on ne reste pas dans un salon qu'on ne peut pas suivre, et on ne le retente pas en boucle
+  /* revue 17/10 : les instantanes sont dates par l'horloge de l'hote (st), pas par leur arrivee : la gigue du reseau ne fait plus
+     trembler le rendu. clockOff = arrivee - st, suit le minimum (le paquet le moins retarde) et remonte lentement ; jitter = retard
+     des autres par rapport a ce minimum, borne le delai de rendu (NET.delay au moins). Pause ou saut d'horloge : on se recale. */
+  pushSnap(d) {
+    const at = performance.now() / 1000, o = at - d.st;
+    if (d.ps) { this._wasPaused = true; }   // en pause st ne bouge plus : l'ecart grandit sans rien dire du reseau, on ne l'apprend pas
+    else if (this.clockOff == null || this._wasPaused || o < this.clockOff || o - this.clockOff > 0.5) { this.clockOff = o; this._wasPaused = false; }
+    else this.clockOff += (o - this.clockOff) * 0.01;
+    const late = d.ps ? 0 : Math.max(0, o - this.clockOff); this.jitter = Math.max(late, (this.jitter || 0) * 0.98);
+    this.snaps.push({ at, st: d.st, d }); if (this.snaps.length > 12) this.snaps.shift();
   },
   /* chaque image de l'invite : touches vers l'hote, etat interpole depuis les instantanes */
   guestFrame() {
     const m = keyMask(keys); if (m !== this.lastMask) { this.lastMask = m; this.send({ t: 'keys', k: m }); }
     const S = this.snaps; if (!S.length) return;
-    const rt = performance.now() / 1000 - NET.delay;
+    const last = S[S.length - 1];
+    if (last.d.ps) { this.applySnap(last.d, last.d, 1); return; }   // en pause : le dernier etat, tel quel
+    const now = performance.now() / 1000, dtF = clamp(now - (this._frameAt || now), 0, 0.1); this._frameAt = now;
+    const want = clamp(Math.max(NET.delay, 1.5 / NET.hz + this.jitter), NET.delay, 0.3);
+    if (this.delayNow == null) this.delayNow = want; else this.delayNow += clamp(want - this.delayNow, -0.03 * dtF, 0.03 * dtF);   // le retard de rendu glisse a 3 % du temps : jamais de saut, le temps rendu ne recule pas
+    const rt = now - this.clockOff - this.delayNow;   // instant a rendre, en temps de simulation de l'hote
     let A = S[0], B = S[0];
-    for (let i = 0; i < S.length; i++) { if (S[i].at <= rt) A = S[i]; if (S[i].at >= rt) { B = S[i]; break; } B = S[i]; }
-    const k = B === A || B.at <= A.at ? 1 : clamp((rt - A.at) / (B.at - A.at), 0, 1);
+    for (let i = 0; i < S.length; i++) { if (S[i].st <= rt) A = S[i]; if (S[i].st >= rt) { B = S[i]; break; } B = S[i]; }
+    const k = B === A || B.st <= A.st ? 1 : clamp((rt - A.st) / (B.st - A.st), 0, 1);
     this.applySnap(A.d, B.d, k);
   },
   tog(w) { this.send({ t: 'tog', w }); },
@@ -4714,6 +4793,7 @@ const Net = {
     if (r.ev) race.events = r.ev.map(e => { const bo = e.b != null ? byId.get(e.b) : null, ot = e.o != null ? byId.get(e.o) : null; return { t: e.t, boat: bo, other: ot, txt: e.x, mine: !bo || bo.isPlayer || !!(ot && ot.isPlayer) }; });
     if (r.inc) race.incidents = r.inc.map(i => ({ t: i.t, give: byId.get(i.g), keep: byId.get(i.k), rule: i.r, why: i.w })).filter(i => i.give && i.keep);
     race.playerFinished = !!player.finished; race.playerOut = player.out || '';
+    const au = $('auto'); if (au && au.classList) au.classList.toggle('on', !!player.autopilot);   // revue 17/10 : le temoin « pilote automatique » suivait seulement la touche locale, l'invite ne la traite pas
   },
 };
 
@@ -4726,7 +4806,7 @@ function netGuestStart(d) {
   SEA.swell = d.swell;
   Net.byId = null; Net.lastMask = -1;
   delete $('end').dataset.shown;
-  Net.status('En course contre ' + Net.peerName, 'ok');
+  { const others = (Net._humans || d.humans || []).filter(h => h !== Net.myName); Net.status('En course avec ' + (others.length ? others.join(', ') : Net.peerName), 'ok'); }
 }
 
 </script>
